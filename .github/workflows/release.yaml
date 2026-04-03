@@ -8,14 +8,24 @@ permissions:
   contents: write
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      tools: ${{ steps.find.outputs.tools }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find Go tools
+        id: find
+        run: |
+          TOOLS=$(find . -maxdepth 2 -name go.mod -printf '%h\n' | sed 's|^\./||' | jq -Rc . | jq -sc .)
+          echo "tools=${TOOLS}" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - tool: crestron-ctp
-            goos: linux
-            goarch: amd64
+        tool: ${{ fromJson(needs.discover.outputs.tools) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -30,14 +40,14 @@ jobs:
         working-directory: ${{ matrix.tool }}
         env:
           CGO_ENABLED: "0"
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags="-s -w" -o ../dist/${{ matrix.tool }}-${{ matrix.goos }}-${{ matrix.goarch }} .
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags="-s -w" -o ../dist/${{ matrix.tool }}-linux-amd64 .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.tool }}-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: ${{ matrix.tool }}-linux-amd64
           path: dist/
 
   release:

@@ -10,11 +10,25 @@ permissions:
   contents: read
 
 jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      tools: ${{ steps.find.outputs.tools }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Find Go tools
+        id: find
+        run: |
+          # Every directory with a go.mod is a tool.
+          TOOLS=$(find . -maxdepth 2 -name go.mod -printf '%h\n' | sed 's|^\./||' | jq -Rc . | jq -sc .)
+          echo "tools=${TOOLS}" >> "$GITHUB_OUTPUT"
+
   test:
+    needs: discover
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        tool: [crestron-ctp]
+        tool: ${{ fromJson(needs.discover.outputs.tools) }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
