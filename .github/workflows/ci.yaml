@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tool: [crestron-ctp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.tool }}/go.mod
+      - name: Test
+        working-directory: ${{ matrix.tool }}
+        run: go test -v -race ./...
+      - name: Build
+        working-directory: ${{ matrix.tool }}
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null .
