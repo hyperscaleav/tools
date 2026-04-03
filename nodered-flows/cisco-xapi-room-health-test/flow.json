@@ -1,0 +1,248 @@
+[
+    {
+        "id": "og-flow-synth-health",
+        "type": "tab",
+        "label": "Room Health Test",
+        "disabled": false,
+        "info": "Nightly AV room health test. Connects to Cisco codecs via JSXAPI (WSS), runs audio diagnostics, captures events, reports pass/fail to Zabbix via history.push API.\n\nTrigger: POST /test/:systemName/health\nBody: {\"codec_ip\": \"...\", \"codec_auth\": \"base64(user:pass)\", \"zbx_host\": \"...\"}\n\nRequires: jsxapi npm package, ZABBIX_API_URL and ZABBIX_API_TOKEN env vars or flow globals.",
+        "env": []
+    },
+    {
+        "id": "og-synth-grp-entry",
+        "type": "group",
+        "z": "og-flow-synth-health",
+        "name": "Entry Point",
+        "style": { "label": true },
+        "nodes": [
+            "og-synth-http-in",
+            "og-synth-validate",
+            "og-synth-http-res"
+        ],
+        "x": 34,
+        "y": 19,
+        "w": 612,
+        "h": 82
+    },
+    {
+        "id": "og-synth-grp-test",
+        "type": "group",
+        "z": "og-flow-synth-health",
+        "name": "Test Execution",
+        "style": { "label": true },
+        "nodes": [
+            "og-synth-run-test"
+        ],
+        "x": 34,
+        "y": 139,
+        "w": 372,
+        "h": 82
+    },
+    {
+        "id": "og-synth-grp-report",
+        "type": "group",
+        "z": "og-flow-synth-health",
+        "name": "Report Results",
+        "style": { "label": true },
+        "nodes": [
+            "og-synth-build-sender",
+            "og-synth-http-push",
+            "og-synth-debug"
+        ],
+        "x": 34,
+        "y": 259,
+        "w": 832,
+        "h": 82
+    },
+    {
+        "id": "og-synth-grp-error",
+        "type": "group",
+        "z": "og-flow-synth-health",
+        "name": "Error Handler",
+        "style": { "label": true },
+        "nodes": [
+            "og-synth-catch",
+            "og-synth-error-handler"
+        ],
+        "x": 34,
+        "y": 379,
+        "w": 492,
+        "h": 82
+    },
+    {
+        "id": "og-synth-http-in",
+        "type": "http in",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-entry",
+        "name": "",
+        "url": "/test/:systemName/health",
+        "method": "post",
+        "upload": false,
+        "swaggerDoc": "",
+        "x": 170,
+        "y": 60,
+        "wires": [
+            [
+                "og-synth-validate"
+            ]
+        ]
+    },
+    {
+        "id": "og-synth-validate",
+        "type": "function",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-entry",
+        "name": "Validate & respond 202",
+        "func": "// Extract parameters from POST body\nconst body = msg.payload || {};\nconst systemName = msg.req.params.systemName;\n\nconst codec_ip = body.codec_ip;\nconst codec_auth = body.codec_auth;\nconst zbx_host = body.zbx_host || systemName;\n\n// Validate required fields\nconst missing = [];\nif (!codec_ip) missing.push('codec_ip');\nif (!codec_auth) missing.push('codec_auth');\n\nif (missing.length > 0) {\n    msg.statusCode = 400;\n    msg.payload = { error: `Missing required fields: ${missing.join(', ')}` };\n    node.error(`Validation failed: missing ${missing.join(', ')}`, msg);\n    return [null, msg];\n}\n\n// Store validated params for downstream nodes\nmsg.testParams = {\n    systemName,\n    codec_ip,\n    codec_auth,\n    zbx_host\n};\n\n// Send 202 Accepted\nmsg.statusCode = 202;\nmsg.payload = { accepted: true, system: systemName };\n\nreturn [msg, msg];",
+        "outputs": 2,
+        "outputLabels": ["continue", "http response"],
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 420,
+        "y": 60,
+        "wires": [
+            [
+                "og-synth-run-test"
+            ],
+            [
+                "og-synth-http-res"
+            ]
+        ]
+    },
+    {
+        "id": "og-synth-http-res",
+        "type": "http response",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-entry",
+        "name": "",
+        "statusCode": "",
+        "headers": {},
+        "x": 610,
+        "y": 60,
+        "wires": []
+    },
+    {
+        "id": "og-synth-run-test",
+        "type": "function",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-test",
+        "name": "Run JSXAPI health test",
+        "func": "const jsxapi = require('jsxapi');\n\nconst { systemName, codec_ip, codec_auth, zbx_host } = msg.testParams;\nconst [username, password] = Buffer.from(codec_auth, 'base64').toString().split(':');\nconst started = Date.now();\nconst events = [];\n\nfunction log(type, data) {\n    events.push({ ts: Date.now(), type, data });\n}\n\nlet xapi;\ntry {\n    // Connect to codec via WebSocket\n    xapi = await jsxapi.connect(`wss://${codec_ip}`, {\n        username,\n        password\n    });\n    log('connected', { codec_ip });\n\n    // Subscribe to audio diagnostic events before starting the test\n    xapi.event.on('Audio Diagnostics', (evt) => {\n        log('audio_diag_event', evt);\n    });\n\n    // Step 1: Check occupancy\n    const presence = await xapi.status.get('RoomAnalytics PeoplePresence');\n    log('occupancy_check', { presence });\n\n    if (presence === 'Yes') {\n        await xapi.close();\n        log('skipped', 'Room occupied');\n        msg.result = {\n            system: systemName,\n            zbx_host,\n            status: 'skipped_occupied',\n            events,\n            audio: { channels_passed: 0, channels_total: 0 },\n            display: { connected: 0, edid_ok: 0, power_ok: 0 },\n            duration_ms: Date.now() - started\n        };\n        return msg;\n    }\n\n    // Step 2: Run audio diagnostics\n    // This plays an impulse through each speaker and measures the response\n    // on every microphone, validating both speakers and mics in one shot.\n    await xapi.command('Audio Diagnostics Start');\n    log('audio_diag_started', null);\n\n    // Wait for diagnostics to complete (typically 10-15 seconds)\n    await new Promise(resolve => setTimeout(resolve, 15000));\n\n    // Step 3: Read diagnostic results\n    let diagResults;\n    try {\n        diagResults = await xapi.status.get('Audio Diagnostics');\n        log('audio_diag_result', diagResults);\n    } catch (err) {\n        log('audio_diag_error', err.message);\n        diagResults = null;\n    }\n\n    // Step 4: Read display status\n    let videoOutput;\n    try {\n        videoOutput = await xapi.status.get('Video Output');\n        log('display_status', videoOutput);\n    } catch (err) {\n        log('display_error', err.message);\n        videoOutput = null;\n    }\n\n    // Disconnect\n    await xapi.close();\n    log('disconnected', null);\n\n    // --- Evaluate results ---\n\n    // Parse audio diagnostic results\n    let audio = { channels_passed: 0, channels_total: 0 };\n    if (diagResults) {\n        // The structure varies by firmware but typically:\n        // diagResults is an object/array of channel results\n        // Each channel has a Result field: 'Passed' or 'Failed'\n        const channels = Array.isArray(diagResults) ? diagResults : \n                         diagResults.Channel ? (Array.isArray(diagResults.Channel) ? diagResults.Channel : [diagResults.Channel]) :\n                         [];\n        audio.channels_total = channels.length;\n        audio.channels_passed = channels.filter(ch => {\n            const result = ch.Result || ch.result || '';\n            return result === 'Passed' || result === 'Pass';\n        }).length;\n    }\n\n    // Parse display status\n    let display = { connected: 0, edid_ok: 0, power_ok: 0 };\n    if (videoOutput) {\n        const connectors = Array.isArray(videoOutput.Connector) ? videoOutput.Connector :\n                           videoOutput.Connector ? [videoOutput.Connector] :\n                           Array.isArray(videoOutput) ? videoOutput : [];\n        display.connected = connectors.filter(c => {\n            const connected = c.Connected || c.connected || '';\n            return connected === 'True' || connected === 'true' || connected === true;\n        }).length;\n        display.edid_ok = connectors.every(c => {\n            if (!c.Connected || c.Connected !== 'True') return true; // skip disconnected\n            return c.EDID && c.EDID !== 'Unknown';\n        }) ? 1 : 0;\n        // Power state may not be available on all connectors\n        display.power_ok = connectors.some(c => {\n            const cs = c.ConnectedDevice || {};\n            return cs.PowerStatus === 'On' || cs.Status === 'On';\n        }) ? 1 : 0;\n    }\n\n    // Determine overall status\n    let status = 'passed';\n    if (audio.channels_total > 0 && audio.channels_passed < audio.channels_total) {\n        status = 'failed';\n    }\n    if (display.connected > 0 && display.edid_ok === 0) {\n        status = 'failed';\n    }\n\n    msg.result = {\n        system: systemName,\n        zbx_host,\n        status,\n        events,\n        audio,\n        display,\n        duration_ms: Date.now() - started\n    };\n\n} catch (err) {\n    // Ensure we always try to close the connection\n    if (xapi) {\n        try { await xapi.close(); } catch (e) { /* ignore */ }\n    }\n    log('error', err.message);\n\n    msg.result = {\n        system: systemName,\n        zbx_host,\n        status: 'error',\n        error: err.message,\n        events,\n        audio: { channels_passed: 0, channels_total: 0 },\n        display: { connected: 0, edid_ok: 0, power_ok: 0 },\n        duration_ms: Date.now() - started\n    };\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "60",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 180,
+        "y": 180,
+        "wires": [
+            [
+                "og-synth-build-sender"
+            ]
+        ]
+    },
+    {
+        "id": "og-synth-build-sender",
+        "type": "function",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-report",
+        "name": "Build history.push payload",
+        "func": "const r = msg.result;\nconst ts = Math.floor(Date.now() / 1000);\nconst host = r.zbx_host;\n\n// Build history.push item array\nconst items = [\n    { host, key: 'og.synth.health.status', value: r.status, clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.duration_ms', value: String(r.duration_ms), clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.log', value: JSON.stringify(r.events), clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.audio.channels_passed', value: String(r.audio.channels_passed), clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.audio.channels_total', value: String(r.audio.channels_total), clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.display.connected', value: String(r.display.connected), clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.display.edid_ok', value: String(r.display.edid_ok), clock: ts, ns: 0 },\n    { host, key: 'og.synth.health.display.power_ok', value: String(r.display.power_ok), clock: ts, ns: 0 }\n];\n\n// Build JSON-RPC request for Zabbix history.push API\nconst apiUrl = env.get('ZABBIX_API_URL') || global.get('ZABBIX_API_URL') || 'http://zabbix-web:8080/api_jsonrpc.php';\nconst apiToken = env.get('ZABBIX_API_TOKEN') || global.get('ZABBIX_API_TOKEN') || '';\n\nmsg.url = apiUrl;\nmsg.headers = { 'Content-Type': 'application/json-rpc' };\nmsg.payload = {\n    jsonrpc: '2.0',\n    method: 'history.push',\n    params: items,\n    auth: apiToken,\n    id: 1\n};\n\n// Keep result for debug\nmsg.result = r;\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 190,
+        "y": 300,
+        "wires": [
+            [
+                "og-synth-http-push"
+            ]
+        ]
+    },
+    {
+        "id": "og-synth-http-push",
+        "type": "http request",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-report",
+        "name": "Zabbix history.push",
+        "method": "POST",
+        "ret": "obj",
+        "paytoqs": "ignore",
+        "url": "",
+        "tls": "",
+        "persist": false,
+        "proxy": "",
+        "insecureHTTPParser": false,
+        "authType": "",
+        "senderr": false,
+        "headers": [],
+        "x": 480,
+        "y": 300,
+        "wires": [
+            [
+                "og-synth-debug"
+            ]
+        ]
+    },
+    {
+        "id": "og-synth-debug",
+        "type": "debug",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-report",
+        "name": "test result",
+        "active": true,
+        "tosidebar": true,
+        "console": false,
+        "tostatus": true,
+        "complete": "result",
+        "targetType": "msg",
+        "statusVal": "result.status",
+        "statusType": "msg",
+        "x": 740,
+        "y": 300,
+        "wires": []
+    },
+    {
+        "id": "og-synth-catch",
+        "type": "catch",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-error",
+        "name": "catch all",
+        "scope": null,
+        "uncaught": false,
+        "x": 130,
+        "y": 420,
+        "wires": [
+            [
+                "og-synth-error-handler"
+            ]
+        ]
+    },
+    {
+        "id": "og-synth-error-handler",
+        "type": "function",
+        "z": "og-flow-synth-health",
+        "g": "og-synth-grp-error",
+        "name": "Build error result",
+        "func": "// If we don't already have a result (error outside the test function),\n// build a minimal one so we still report something to Zabbix.\nif (!msg.result) {\n    const params = msg.testParams || {};\n    msg.result = {\n        system: params.systemName || 'unknown',\n        zbx_host: params.zbx_host || 'unknown',\n        status: 'error',\n        error: msg.error ? msg.error.message : 'Unknown error',\n        events: [],\n        audio: { channels_passed: 0, channels_total: 0 },\n        display: { connected: 0, edid_ok: 0, power_ok: 0 },\n        duration_ms: 0\n    };\n}\n\nreturn msg;",
+        "outputs": 1,
+        "timeout": "",
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 380,
+        "y": 420,
+        "wires": [
+            [
+                "og-synth-build-sender"
+            ]
+        ]
+    }
+]
